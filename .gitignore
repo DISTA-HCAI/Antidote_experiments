@@ -212,3 +212,5 @@ cache_dir
 
 # Local model outputs
 result/
+# selfsrc: output delle run di immunizzazione
+selfsrc/runs/
