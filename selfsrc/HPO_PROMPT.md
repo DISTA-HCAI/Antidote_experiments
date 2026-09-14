@@ -116,6 +116,24 @@ All metrics are computed on **held-out** rows (never seen in training). Definiti
 (`after.safety_margin`) is a secondary sanity signal: a hardened model that only refuses
 *before* an attack has learned nothing that the paper is about.
 
+**Check the noise floor before you trust any `trr`.** The table prints a `+-` column: the
+2σ uncertainty on `trr`, propagated from `safety_margin_se`. A `trr` printed with a
+leading `~` is *inside* that band and is not distinguishable from zero — ranking such
+trials against each other is ranking noise. With the default eval size the band is ≈0.9
+while observed `trr` values are ≈0.03, so **a trial that only moves `trr` by a few
+hundredths has told you nothing.** To get a measurable signal, either raise
+`data.eval_n_harmful` / `data.eval_n_benign` (shrinks `se`) or raise `attack_eval.steps`
+(widens `before.sm − base_attacked.sm`, the denominator). Do that *before* spending trials
+on training hyperparameters.
+
+**Also watch `d_safe`** (`after.sm − before.sm`, the `d_safe` column): how much the
+immunisation moves the *clean* margin. A positive `trr` bought with a strongly positive
+`d_safe` may just mean the model started higher, not that it resists tampering; a negative
+`d_safe` means the immunisation is damaging the model before any attack is even applied.
+
+Trials that override `data.*` get a different eval split and therefore a different base —
+the `ev` column groups them. **Only compare `safety_margin` values within one `ev` group.**
+
 Diagnostics you can read from the loss tails without opening any log:
 - Adversary loss should *decrease within* Phase 1 and *jump back up* after Phase 2 (the
   defender undid the attack). Flat adversary loss = adversary not learning (lr too low,
@@ -211,6 +229,7 @@ selfsrc/hpo/wait_trial.sh t03 60        # second arg = poll interval in seconds
 # compare trials (one line each)
 python -m selfsrc.trials --last 8
 python -m selfsrc.trials --sort score
+python -m selfsrc.trials --explain t03  # one trial in prose: the four margins, the TRR, the noise check
 python -m selfsrc.trials --show t03     # full JSON of one trial, only when you need it
 ```
 

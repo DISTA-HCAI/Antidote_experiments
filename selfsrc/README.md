@@ -192,7 +192,8 @@ proprio contesto. Il kit di supporto sta in `selfsrc/hpo/`:
 | `hpo/base_hpo.json` | config di partenza "veloce": filtro per lunghezza, `max_length=128`, fette disgiunte, budget di tempo, attacco calibrabile |
 | `hpo/run_trial.sh NAME "nota" --set ...` | lancia UN trial in background (rifiuta se un altro gira) |
 | `hpo/wait_trial.sh NAME [sec]` | aspetta e stampa SOLO la riga JSON finale (o le ultime righe d'errore) |
-| `python -m selfsrc.trials` | tabella dei trial da `runs/trials.jsonl` (`--sort score`, `--show NAME`, `--best`) |
+| `python -m selfsrc.trials` | tabella dei trial da `runs/trials.jsonl` (`--sort score`, `--best`, `--show NAME`) |
+| `python -m selfsrc.trials --explain NAME` | un trial raccontato a parole: i quattro `sm`, come ne esce il TRR, se e' sopra il rumore |
 
 La metrica principale è **TRR** (tamper resistance recovered): dopo un attacco di
 fine-tuning malevolo a budget fisso (`attack_eval`, vedi `attack.py`), quanta parte del
