@@ -48,8 +48,11 @@ from .attack import (
 )
 from .config import Config, apply_runtime_settings, load_config
 from .data import build_dataloaders, build_datasets, check_supervision, suggest_max_length
-from .evaluate import compare, evaluate_model, generation_smoke_test, make_eval_dpo_util
-from .immunise import run_immunisation, total_planned_steps
+from .evaluate import (
+    compare, evaluate_model, generation_smoke_test, make_eval_dpo_util,
+    safety_margins_per_example, summarize_margins,
+)
+from .immunise import ProbeAbort, run_immunisation, total_planned_steps
 from .model_setup import (
     build_adversary,
     build_defender,
@@ -161,6 +164,9 @@ def compact_result(summary: Dict[str, Any], cfg: Config, args: argparse.Namespac
         "trr": att.get("trr"),
         "utility_delta": summary.get("eval_delta", {}).get("benign_lm_loss"),
         "safety_delta": summary.get("eval_delta", {}).get("safety_margin"),
+        # Traiettoria della sonda: solo d_safe per blocco, per vedere se il trial stava
+        # migliorando o affondando senza aprire metrics.jsonl.
+        "probe_d_safe": [round(p["d_safe"], 4) for p in summary.get("probe") or []],
     }
 
 
@@ -339,10 +345,55 @@ def main(argv: Optional[List[str]] = None) -> int:
                     run_dir / name,
                 )
 
+        # Sonda periodica: il margine di sicurezza PULITO misurato durante il training,
+        # sulle stesse righe di eval della misura finale. Serve a due cose: vedere la
+        # traiettoria invece del solo punto finale, e fermare presto i trial gia' persi.
+        probe_cfg = cfg.evaluation.get("probe", {})
+        probe_history: List[Dict[str, float]] = []
+        summary["probe"] = probe_history
+        probe_strikes = 0
+
         def on_block_end(epoch: int, block: int) -> None:
+            nonlocal probe_strikes
             if ckpt.get("save_every_block", False):
                 save_checkpoint(f"e{epoch}b{block}")
                 monitor.log_line(f"[checkpoint] salvato a fine epoca {epoch} blocco {block}")
+
+            if not probe_cfg.get("enabled", False) or before is None:
+                return
+            if block % int(probe_cfg.get("every_blocks", 1)) != 0:
+                return
+
+            m = summarize_margins(
+                safety_margins_per_example(model, datasets["eval_harmful"], tokenizer, cfg, eval_dpo)
+            )
+            d_safe = m["safety_margin"] - before["safety_margin"]
+            probe_history.append({
+                "epoch": epoch, "block": block, "t": round(time.time() - monitor.start_time, 1),
+                "safety_margin": m["safety_margin"], "safety_margin_se": m["safety_margin_se"],
+                "safe_pref_rate": m["safe_pref_rate"], "d_safe": d_safe,
+            })
+            monitor.record(phase="probe", epoch=epoch, block=block, step=0, k_steps=0,
+                           metrics={"probe_safety_margin": m["safety_margin"]},
+                           extra={"probe_d_safe": d_safe, "probe_safe_pref_rate": m["safe_pref_rate"]})
+            monitor.log_line(
+                f"[sonda] e{epoch} b{block}: sm={m['safety_margin']:+.3f} pref={m['safe_pref_rate']:.2f} "
+                f"d_safe={d_safe:+.3f}",
+                style="cyan",
+            )
+
+            # Regola di abbandono: il defender sta distruggendo la sicurezza pulita. Con
+            # d_safe molto negativo il TRR finale non si riprende (vedi REPORT round 1),
+            # quindi il tempo speso da qui in poi e' sprecato.
+            floor = probe_cfg.get("abort_if_d_safe_below")
+            if floor is None:
+                return
+            probe_strikes = probe_strikes + 1 if d_safe < float(floor) else 0
+            if probe_strikes >= int(probe_cfg.get("abort_patience", 2)):
+                raise ProbeAbort(
+                    f"d_safe={d_safe:+.3f} sotto {float(floor):+.3f} per {probe_strikes} sonde "
+                    f"consecutive (e{epoch} b{block})"
+                )
 
         try:
             run_immunisation(
@@ -358,6 +409,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             summary["status"] = "low_memory"
             exit_code = 2
             monitor.log_line("\n[run] interrotto per RAM insufficiente: salvo lo stato corrente.", style="bold red")
+        except ProbeAbort as exc:
+            # Non e' un errore: la sonda ha deciso che il trial e' perso. Si prosegue con
+            # valutazione e attacco, cosi' la riga nel registro resta confrontabile.
+            summary["status"] = "aborted_probe"
+            summary["probe_abort_reason"] = str(exc)
+            monitor.log_line(f"\n[sonda] trial abbandonato: {exc}", style="bold yellow")
         gc.collect()
 
         # --- 5. Grafici e checkpoint ----------------------------------------

@@ -78,6 +78,14 @@ class TimeBudgetExceeded(Exception):
     """Sollevata (e gestita) dentro `run_immunisation` quando scade `training.max_minutes`."""
 
 
+class ProbeAbort(Exception):
+    """Sollevata da `on_block_end` quando la sonda periodica dice che il trial e' perso.
+
+    Non viene gestita qui: risale fino a `run.py`, che chiude la run con status
+    `aborted_probe` salvando comunque le metriche gia' raccolte.
+    """
+
+
 def _cycle(dataloader: DataLoader) -> Iterator[Dict[str, List[str]]]:
     """
     Itera all'infinito su un DataLoader: quando finisce, ricomincia da capo.

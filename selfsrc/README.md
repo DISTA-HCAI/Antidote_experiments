@@ -194,6 +194,7 @@ proprio contesto. Il kit di supporto sta in `selfsrc/hpo/`:
 | `hpo/wait_trial.sh NAME [sec]` | aspetta e stampa SOLO la riga JSON finale (o le ultime righe d'errore) |
 | `python -m selfsrc.trials` | tabella dei trial da `runs/trials.jsonl` (`--sort score`, `--best`, `--show NAME`) |
 | `python -m selfsrc.trials --explain NAME` | un trial raccontato a parole: i quattro `sm`, come ne esce il TRR, se e' sopra il rumore |
+| `evaluation.probe` | sonda periodica DURANTE il training: misura il margine pulito ogni `every_blocks` blocchi e, con `abort_if_d_safe_below`, abbandona presto i trial gia' persi (`status: aborted_probe`). La traiettoria finisce in `probe_d_safe` nel registro |
 
 La metrica principale è **TRR** (tamper resistance recovered): dopo un attacco di
 fine-tuning malevolo a budget fisso (`attack_eval`, vedi `attack.py`), quanta parte del
