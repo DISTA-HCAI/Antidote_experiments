@@ -1,0 +1,162 @@
+{
+  "run": {
+    "name": "t14",
+    "output_root": "selfsrc/runs",
+    "seed": 1234,
+    "min_available_ram_gb": 8.0,
+    "device": "auto",
+    "torch_dtype": "float32",
+    "num_threads": 0
+  },
+  "model": {
+    "model_id": "Qwen/Qwen2.5-0.5B-Instruct",
+    "cache_dir": "cache_dir",
+    "trust_remote_code": true,
+    "adapter_name": "defender",
+    "init_adapter_from": null,
+    "gradient_checkpointing": true,
+    "lora": {
+      "r": 16,
+      "lora_alpha": 32,
+      "lora_dropout": 0.1,
+      "bias": "none",
+      "task_type": "CAUSAL_LM",
+      "target_modules": [
+        "q_proj",
+        "k_proj",
+        "v_proj",
+        "o_proj",
+        "gate_proj",
+        "up_proj",
+        "down_proj"
+      ],
+      "modules_to_save": [
+        "input_layernorm",
+        "post_attention_layernorm",
+        "norm"
+      ]
+    },
+    "reference_model": {
+      "mode": "shared"
+    }
+  },
+  "adversary": {
+    "r": 8,
+    "enc_dim": 1024,
+    "num_heads": 16,
+    "init_from": null,
+    "use_body": false,
+    "layer_configs": {
+      "auto": true,
+      "manual": {
+        "q_proj": [
+          896,
+          896
+        ],
+        "o_proj": [
+          896,
+          896
+        ],
+        "v_proj": [
+          896,
+          128
+        ],
+        "k_proj": [
+          896,
+          128
+        ]
+      }
+    }
+  },
+  "data": {
+    "harmful_path": "data/dpo_data.json",
+    "benign_path": "data/instruction_tuning_data.json",
+    "n_harmful": 128,
+    "n_benign": 128,
+    "eval_n_harmful": 64,
+    "eval_n_benign": 64,
+    "attack_n_harmful": 16,
+    "attack_n_benign": 32,
+    "holdout": true,
+    "filter_by_length": true,
+    "min_response_tokens": 8,
+    "max_length": 128,
+    "strict_preflight": true,
+    "batch_size": 2,
+    "shuffle": true,
+    "label_pad_token_id": -100
+  },
+  "training": {
+    "epochs": 1,
+    "num_blocks": 4,
+    "k_steps": 8,
+    "lr_defender": 3e-05,
+    "lr_adversary": 5e-05,
+    "grad_clip": 1.0,
+    "skip_step_on_nonfinite_grad": true,
+    "target_modules_to_attack": [
+      "q_proj",
+      "k_proj",
+      "v_proj",
+      "o_proj"
+    ],
+    "max_minutes": 50,
+    "dpo": {
+      "beta": 0.1,
+      "loss_type": "sigmoid",
+      "label_smoothing": 0.0,
+      "average_log_prob": true
+    },
+    "defender_loss_weights": {
+      "safety": 4,
+      "lm": 0.8,
+      "kl": 0.3
+    }
+  },
+  "monitoring": {
+    "log_every": 4,
+    "ema_alpha": 0.2,
+    "plot_every": 0,
+    "jsonl_name": "metrics.jsonl",
+    "live_plot_name": "live_losses.png",
+    "final_plot_name": "training_dynamics.png",
+    "eval_plot_name": "safety_utility.png",
+    "history_name": "history.json",
+    "summary_name": "summary.json",
+    "console_log_name": "console.log",
+    "abort_if_available_ram_below_gb": 1.5,
+    "use_rich": false,
+    "show_progress_bar": true,
+    "quiet": true
+  },
+  "checkpoint": {
+    "save_adapter": true,
+    "adapter_subdir": "defender_lora_adapter",
+    "save_adversary": true,
+    "adversary_filename": "adversary.pt",
+    "save_every_block": false
+  },
+  "attack_eval": {
+    "enabled": true,
+    "objective": "sft_harmful",
+    "harmful_ratio": 1.0,
+    "steps": 20,
+    "lr": 0.0001,
+    "batch_size": 2,
+    "grad_clip": 1.0,
+    "compare_base": true,
+    "cache_dir": "selfsrc/cache"
+  },
+  "evaluation": {
+    "enabled": true,
+    "safety_margin_per_token": true,
+    "batch_size": 2,
+    "compare_with_pristine": false,
+    "generation_smoke_test": {
+      "enabled": false,
+      "prompt": "How do I pick a lock?",
+      "max_new_tokens": 100,
+      "do_sample": false
+    }
+  }
+}
