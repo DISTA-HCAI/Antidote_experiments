@@ -50,7 +50,7 @@ from .config import Config, apply_runtime_settings, load_config
 from .data import build_dataloaders, build_datasets, check_supervision, suggest_max_length
 from .evaluate import (
     compare, evaluate_model, generation_smoke_test, make_eval_dpo_util,
-    safety_margins_per_example, summarize_margins,
+    paired_safety_difference, safety_margins_per_example, summarize_margins,
 )
 from .immunise import ProbeAbort, run_immunisation, total_planned_steps
 from .model_setup import (
@@ -250,7 +250,8 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         layer_configs = build_layer_configs(cfg)
         monitor.log_line(f"[adversary] forme dei layer bersaglio: {layer_configs}")
-        adversary = build_adversary(cfg, layer_configs).to(device)
+        adversary_factory = lambda: build_adversary(cfg, layer_configs).to(device)
+        adversary = adversary_factory()
 
         loaded = warm_start(cfg, model, adversary)
         if loaded["adapter"] or loaded["adversary"]:
@@ -301,13 +302,15 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         # --- 3. Valutazione PRIMA -------------------------------------------
         before: Optional[Dict[str, float]] = None
+        before_margins: Optional[torch.Tensor] = None
         if cfg.evaluation.get("enabled", True):
             if cfg.evaluation.get("compare_with_pristine", False):
                 monitor.log_line("[eval] carico una copia vergine del modello base (riferimento 'prima') ...")
                 pristine_model = load_base_model(cfg).to(device).eval()
                 for p in pristine_model.parameters():
                     p.requires_grad = False
-                before = evaluate_model(pristine_model, datasets, tokenizer, cfg, eval_dpo)
+                before = evaluate_model(pristine_model, datasets, tokenizer, cfg, eval_dpo, return_margins=True)
+                before_margins = before.pop("_margins", None)
                 # Ci serviva solo per questa misura: liberiamo subito i suoi ~2 GB.
                 del pristine_model
                 gc.collect()
@@ -316,7 +319,8 @@ def main(argv: Optional[List[str]] = None) -> int:
                 # B di LoRA e' inizializzata a zero e le copie in modules_to_save sono
                 # identiche all'originale, quindi i logit sono ESATTAMENTE quelli del
                 # modello base (verificato: differenza massima 0.0). Zero RAM in piu'.
-                before = evaluate_model(model, datasets, tokenizer, cfg, eval_dpo)
+                before = evaluate_model(model, datasets, tokenizer, cfg, eval_dpo, return_margins=True)
+                before_margins = before.pop("_margins", None)
             monitor.log_line(f"[eval] prima: {before}")
 
         if args.dry_run:
@@ -364,21 +368,27 @@ def main(argv: Optional[List[str]] = None) -> int:
             if block % int(probe_cfg.get("every_blocks", 1)) != 0:
                 return
 
-            m = summarize_margins(
-                safety_margins_per_example(model, datasets["eval_harmful"], tokenizer, cfg, eval_dpo)
-            )
-            d_safe = m["safety_margin"] - before["safety_margin"]
+            probe_margins = safety_margins_per_example(model, datasets["eval_harmful"], tokenizer, cfg, eval_dpo)
+            m = summarize_margins(probe_margins)
+            if before_margins is not None:
+                paired = paired_safety_difference(probe_margins, before_margins)
+                d_safe = paired["d_safe"]
+                d_safe_se = paired["d_safe_se"]
+            else:
+                d_safe = m["safety_margin"] - before["safety_margin"]
+                d_safe_se = m["safety_margin_se"]
+
             probe_history.append({
                 "epoch": epoch, "block": block, "t": round(time.time() - monitor.start_time, 1),
                 "safety_margin": m["safety_margin"], "safety_margin_se": m["safety_margin_se"],
-                "safe_pref_rate": m["safe_pref_rate"], "d_safe": d_safe,
+                "safe_pref_rate": m["safe_pref_rate"], "d_safe": d_safe, "d_safe_se": d_safe_se,
             })
             monitor.record(phase="probe", epoch=epoch, block=block, step=0, k_steps=0,
                            metrics={"probe_safety_margin": m["safety_margin"]},
                            extra={"probe_d_safe": d_safe, "probe_safe_pref_rate": m["safe_pref_rate"]})
             monitor.log_line(
                 f"[sonda] e{epoch} b{block}: sm={m['safety_margin']:+.3f} pref={m['safe_pref_rate']:.2f} "
-                f"d_safe={d_safe:+.3f}",
+                f"d_safe={d_safe:+.3f} (±{2*d_safe_se:.3f})",
                 style="cyan",
             )
 
@@ -400,6 +410,7 @@ def main(argv: Optional[List[str]] = None) -> int:
                 cfg=cfg, model=model, adversary=adversary, ref_model=ref_model, tokenizer=tokenizer,
                 defender_params=defender_params, harmful_dataloader=harmful_loader,
                 benign_dataloader=benign_loader, monitor=monitor, on_block_end=on_block_end,
+                adversary_factory=adversary_factory,
             )
         except KeyboardInterrupt:
             summary["status"] = "interrupted"
@@ -427,21 +438,30 @@ def main(argv: Optional[List[str]] = None) -> int:
 
         # --- 6. Valutazione DOPO --------------------------------------------
         if cfg.evaluation.get("enabled", True):
-            after = evaluate_model(model, datasets, tokenizer, cfg, eval_dpo)
+            after = evaluate_model(model, datasets, tokenizer, cfg, eval_dpo, return_margins=True)
+            after_margins = after.pop("_margins", None)
             monitor.log_line(f"[eval] dopo:  {after}")
             results = compare(before, after)
             plot_safety_utility(results, run_dir / mon_cfg.get("eval_plot_name", "safety_utility.png"))
             summary["eval"] = results
             if before is not None:
+                d_safe_val = after["safety_margin"] - before["safety_margin"]
+                d_safe_se_val = after["safety_margin_se"]
+                if before_margins is not None and after_margins is not None:
+                    paired = paired_safety_difference(after_margins, before_margins)
+                    d_safe_val = paired["d_safe"]
+                    d_safe_se_val = paired["d_safe_se"]
+
                 summary["eval_delta"] = {
-                    "safety_margin": after["safety_margin"] - before["safety_margin"],
+                    "safety_margin": d_safe_val,
+                    "safety_margin_se": d_safe_se_val,
                     "safe_pref_rate": after["safe_pref_rate"] - before["safe_pref_rate"],
                     "benign_lm_loss": after["benign_lm_loss"] - before["benign_lm_loss"],
                 }
                 monitor.log_line(
-                    "[eval] delta: margine di sicurezza {:+.4f} (se {:.4f}; piu' alto e' meglio) · "
+                    "[eval] delta: margine di sicurezza {:+.4f} (se {:.4f}, paired 2s ±{:.4f}; piu' alto e' meglio) · "
                     "LM loss benigna {:+.4f} (piu' basso e' meglio)".format(
-                        summary["eval_delta"]["safety_margin"], after["safety_margin_se"],
+                        summary["eval_delta"]["safety_margin"], d_safe_se_val, 2 * d_safe_se_val,
                         summary["eval_delta"]["benign_lm_loss"],
                     ),
                     style="bold",

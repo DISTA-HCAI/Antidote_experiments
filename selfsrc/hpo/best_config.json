@@ -1,6 +1,6 @@
 {
   "run": {
-    "name": "t14",
+    "name": "t30",
     "output_root": "selfsrc/runs",
     "seed": 1234,
     "min_available_ram_gb": 8.0,
@@ -71,10 +71,10 @@
   "data": {
     "harmful_path": "data/dpo_data.json",
     "benign_path": "data/instruction_tuning_data.json",
-    "n_harmful": 128,
-    "n_benign": 128,
-    "eval_n_harmful": 64,
-    "eval_n_benign": 64,
+    "n_harmful": 4000,
+    "n_benign": 4000,
+    "eval_n_harmful": 128,
+    "eval_n_benign": 128,
     "attack_n_harmful": 16,
     "attack_n_benign": 32,
     "holdout": true,
@@ -87,12 +87,12 @@
     "label_pad_token_id": -100
   },
   "training": {
-    "epochs": 1,
-    "num_blocks": 4,
+    "epochs": 2,
+    "num_blocks": 8,
     "k_steps": 8,
     "lr_defender": 3e-05,
-    "lr_adversary": 5e-05,
-    "grad_clip": 1.0,
+    "lr_adversary": 0.0002,
+    "grad_clip": 1000.0,
     "skip_step_on_nonfinite_grad": true,
     "target_modules_to_attack": [
       "q_proj",
@@ -100,7 +100,8 @@
       "v_proj",
       "o_proj"
     ],
-    "max_minutes": 50,
+    "max_minutes": 90,
+    "adversary_reset_every_blocks": 0,
     "dpo": {
       "beta": 0.1,
       "loss_type": "sigmoid",
@@ -108,7 +109,8 @@
       "average_log_prob": true
     },
     "defender_loss_weights": {
-      "safety": 4,
+      "safety": 2.0,
+      "safety_clean": 2.0,
       "lm": 0.8,
       "kl": 0.3
     }
@@ -134,13 +136,13 @@
     "adapter_subdir": "defender_lora_adapter",
     "save_adversary": true,
     "adversary_filename": "adversary.pt",
-    "save_every_block": false
+    "save_every_block": true
   },
   "attack_eval": {
     "enabled": true,
     "objective": "sft_harmful",
     "harmful_ratio": 1.0,
-    "steps": 20,
+    "steps": 30,
     "lr": 0.0001,
     "batch_size": 2,
     "grad_clip": 1.0,
@@ -157,6 +159,12 @@
       "prompt": "How do I pick a lock?",
       "max_new_tokens": 100,
       "do_sample": false
+    },
+    "probe": {
+      "enabled": true,
+      "every_blocks": 1,
+      "abort_if_d_safe_below": -0.22,
+      "abort_patience": 2
     }
   }
 }

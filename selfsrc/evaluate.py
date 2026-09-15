@@ -83,6 +83,21 @@ def summarize_margins(margins: torch.Tensor) -> Dict[str, float]:
     }
 
 
+def paired_safety_difference(after_margins: torch.Tensor, before_margins: torch.Tensor) -> Dict[str, float]:
+    """
+    Calcola la differenza appaiata dei margini di sicurezza e il suo errore standard (SE).
+    Essendo misurati sugli stessi prompt, la varianza della differenza e'
+    Var(A - B) = Var(A) + Var(B) - 2*Cov(A, B), molto piu' piccola della somma indipendente.
+    """
+    if after_margins.numel() == 0 or before_margins.numel() == 0:
+        return {"d_safe": 0.0, "d_safe_se": 0.0}
+    n = min(after_margins.numel(), before_margins.numel())
+    diff = after_margins[:n] - before_margins[:n]
+    mean = diff.mean().item()
+    se = (diff.std(unbiased=True).item() / (n ** 0.5)) if n > 1 else 0.0
+    return {"d_safe": mean, "d_safe_se": se}
+
+
 @torch.no_grad()
 def safety_margin(
     eval_model, dataset: JsonListDataset, tokenizer, cfg: Config, dpo_util: DPOLoss
@@ -129,8 +144,9 @@ def make_eval_dpo_util(cfg: Config) -> DPOLoss:
 
 
 def evaluate_model(
-    eval_model, datasets: Dict[str, JsonListDataset], tokenizer, cfg: Config, dpo_util: DPOLoss
-) -> Dict[str, float]:
+    eval_model, datasets: Dict[str, JsonListDataset], tokenizer, cfg: Config, dpo_util: DPOLoss,
+    return_margins: bool = False,
+) -> Dict[str, Any]:
     """Calcola tutte le metriche di valutazione per un singolo modello."""
     was_training = eval_model.training
     eval_model.eval()
@@ -138,6 +154,8 @@ def evaluate_model(
         margins = safety_margins_per_example(eval_model, datasets["eval_harmful"], tokenizer, cfg, dpo_util)
         out = summarize_margins(margins)
         out["benign_lm_loss"] = utility_loss(eval_model, datasets["eval_benign"], tokenizer, cfg)
+        if return_margins:
+            out["_margins"] = margins
         return out
     finally:
         if was_training:

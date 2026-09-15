@@ -127,6 +127,8 @@
     "_target_modules_to_attack": "Layer su cui l'adversary cattura le attivazioni e inietta la patch LoRA malevola.",
     "max_minutes": 0,
     "_max_minutes": "Budget di tempo (minuti) per il solo ciclo di training; 0 = illimitato. Allo scadere il training si ferma a fine passo e la run prosegue con checkpoint, valutazione e attacco. Per HPO: impostarlo SEMPRE.",
+    "adversary_reset_every_blocks": 0,
+    "_adversary_reset_every_blocks": "Ogni quanti blocchi azzerare l'adversary hypernetwork e ricreare il suo AdamW (0 = mai, default). Risolve D3 evitando che l'adversary accumuli capacita' all'infinito vincendo la corsa agli armamenti.",
     "dpo": {
       "beta": 0.1,
       "loss_type": "ipo",
@@ -136,6 +138,8 @@
     },
     "defender_loss_weights": {
       "safety": 1.0,
+      "safety_clean": 0.0,
+      "_safety_clean": "Peso della loss DPO calcolata sul modello pulito (senza patch malevola): ancora la sicurezza base durante l'immunizzazione (0.0 = disattivato, default). Risolve D4.",
       "lm": 0.8,
       "kl": 0.3
     }

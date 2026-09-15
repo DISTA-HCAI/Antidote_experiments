@@ -123,6 +123,7 @@ def run_immunisation(
     benign_dataloader: DataLoader,
     monitor: RunMonitor,
     on_block_end: Optional[Callable[[int, int], None]] = None,
+    adversary_factory: Optional[Callable[[], Adversary]] = None,
 ) -> Dict[str, Any]:
     """
     Esegue il ciclo bi-livello completo. Ritorna lo storico delle loss.
@@ -145,6 +146,7 @@ def run_immunisation(
     skipped_steps = {"adversary": 0, "defender": 0}
     weights = t["defender_loss_weights"]
     adapter_name = cfg.model.get("adapter_name", "defender")
+    adv_reset_every = int(t.get("adversary_reset_every_blocks", 0) or 0)
 
     model.to(device)
     adversary.to(device)
@@ -239,10 +241,26 @@ def run_immunisation(
             n_hooks = len(act_cache.hooks)
             monitor.log_line(f"[setup] hook di attivazione registrati su {n_hooks} moduli {target_modules}")
 
+            blocks_completed = 0
             for epoch in range(1, epochs + 1):
                 monitor.log_line(f"\n===== Epoca {epoch}/{epochs} =====", style="bold cyan")
 
                 for block_idx in range(1, num_blocks + 1):
+                    # Knob A (D3): reset dell'adversary ogni adv_reset_every blocchi
+                    if adv_reset_every > 0 and blocks_completed > 0 and blocks_completed % adv_reset_every == 0:
+                        monitor.log_line(
+                            f"[adversary] reset pesi hypernetwork e AdamW (blocco {block_idx}, "
+                            f"ogni {adv_reset_every} blocchi)",
+                            style="bold yellow",
+                        )
+                        if adversary_factory is not None:
+                            fresh = adversary_factory()
+                            adversary.load_state_dict(fresh.state_dict())
+                            del fresh
+                        else:
+                            adversary._initialize_weights()
+                        optimizer_a = AdamW(adversary.parameters(), lr=float(t["lr_adversary"]))
+
                     # ============ FASE 1: ALLENAMENTO DELL'ADVERSARY ============
                     monitor.log_line(
                         f"--- Blocco {block_idx}/{num_blocks}: adversary per {k_steps} passo/i ---",
@@ -374,10 +392,19 @@ def run_immunisation(
                         w_s, w_lm, w_kl = (
                             float(weights["safety"]), float(weights["lm"]), float(weights["kl"])
                         )
+                        w_sc = float(weights.get("safety_clean", 0.0) or 0.0)
                         monitor.check_memory()
                         with adversarial_patch(model, lora_weights_adv):
                             loss_s = compute_dpo_loss(model, defender_dpo_batch, ref_logps, dpo_util)
                             (w_s * loss_s).backward()
+
+                        # Knob B (D4): ancora la sicurezza pulita (senza patch adversariale)
+                        loss_sc_val = 0.0
+                        if w_sc > 0.0:
+                            monitor.check_memory()
+                            loss_sc = compute_dpo_loss(model, defender_dpo_batch, ref_logps, dpo_util)
+                            (w_sc * loss_sc).backward()
+                            loss_sc_val = loss_sc.item()
 
                         # Obiettivo di retain: restare vicini al comportamento originale sulle
                         # istruzioni benigne. Qui la patch NON e' iniettata (siamo fuori dal
@@ -390,7 +417,12 @@ def run_immunisation(
                         loss_kl = compute_kl_loss(model, ref_model, benign_batch)
                         (w_kl * loss_kl).backward()
 
-                        total_loss_d = w_s * loss_s.item() + w_lm * loss_lm.item() + w_kl * loss_kl.item()
+                        total_loss_d = (
+                            w_s * loss_s.item()
+                            + (w_sc * loss_sc_val if w_sc > 0.0 else 0.0)
+                            + w_lm * loss_lm.item()
+                            + w_kl * loss_kl.item()
+                        )
 
                         grad_norm, skipped = clip_or_skip(defender_params, optimizer_d)
                         if skipped:
@@ -401,17 +433,21 @@ def run_immunisation(
                                 style="yellow",
                             )
 
+                        metrics_d = {
+                            "defender_safety_loss": loss_s.item(),
+                            "defender_lm_loss": loss_lm.item(),
+                            "defender_kl_loss": loss_kl.item(),
+                        }
+                        if w_sc > 0.0:
+                            metrics_d["defender_safety_clean_loss"] = loss_sc_val
+
                         monitor.record(
                             phase="defender",
                             epoch=epoch,
                             block=block_idx,
                             step=step,
                             k_steps=k_steps,
-                            metrics={
-                                "defender_safety_loss": loss_s.item(),
-                                "defender_lm_loss": loss_lm.item(),
-                                "defender_kl_loss": loss_kl.item(),
-                            },
+                            metrics=metrics_d,
                             extra={"defender_total_loss": total_loss_d, "grad_norm": grad_norm, "skipped": int(skipped)},
                         )
                         if time_budget_exhausted():
@@ -419,6 +455,7 @@ def run_immunisation(
 
                     if on_block_end is not None:
                         on_block_end(epoch, block_idx)
+                    blocks_completed += 1
     except TimeBudgetExceeded:
         stopped_by_time_budget = True
         monitor.log_line(
